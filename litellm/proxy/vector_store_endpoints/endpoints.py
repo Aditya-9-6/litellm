@@ -15,9 +15,13 @@ from litellm.proxy.auth.user_api_key_auth import user_api_key_auth
 from litellm.proxy.common_request_processing import ProxyBaseLLMRequestProcessing
 from litellm.proxy.utils import jsonify_object
 from litellm.proxy.vector_store_endpoints.utils import (
+    MILVUS_ADMIN_CONFIGURED_CONNECTION,
+    MILVUS_MANAGED_CONFIGURATION_FIELDS,
+    assert_proxy_admin_for_user_supplied_vector_store_connection,
     assert_proxy_admin_for_vector_store_index_management,
     assert_user_can_access_vector_store,
     get_litellm_managed_vector_store,
+    normalize_vector_store_provider,
 )
 from litellm.repositories.table_repositories import ManagedVectorStoreIndexRepository
 from litellm.types.vector_stores import IndexCreateRequest, IndexListResponse
@@ -55,6 +59,13 @@ async def _update_request_data_with_litellm_managed_vector_store_registry(
                 user_api_key_dict=user_api_key_dict,
             )
 
+        if normalize_vector_store_provider(vector_store_to_run.get("custom_llm_provider")) == "milvus":
+            for field in MILVUS_MANAGED_CONFIGURATION_FIELDS:
+                data.pop(field, None)
+        data.pop(MILVUS_ADMIN_CONFIGURED_CONNECTION, None)
+        data.pop("custom_llm_provider", None)
+        data.pop("litellm_credential_name", None)
+
         if "custom_llm_provider" in vector_store_to_run:
             data["custom_llm_provider"] = vector_store_to_run.get("custom_llm_provider")
 
@@ -66,6 +77,21 @@ async def _update_request_data_with_litellm_managed_vector_store_registry(
                 vector_store_to_run.get("litellm_params", {}) or {}
             )  # mutable-ok: request execution merges persisted params into a mutable body
             data.update(litellm_params)
+        if user_api_key_dict is not None:
+            assert_proxy_admin_for_user_supplied_vector_store_connection(
+                custom_llm_provider=data.get("custom_llm_provider"),
+                litellm_params=data,
+                user_api_key_dict=user_api_key_dict,
+                managed=True,
+            )
+    else:
+        data.pop(MILVUS_ADMIN_CONFIGURED_CONNECTION, None)
+        if user_api_key_dict is not None:
+            assert_proxy_admin_for_user_supplied_vector_store_connection(
+                custom_llm_provider=data.get("custom_llm_provider"),
+                litellm_params=data,
+                user_api_key_dict=user_api_key_dict,
+            )
     return data
 
 

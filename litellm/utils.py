@@ -8945,6 +8945,7 @@ class ProviderConfigManager:
     def get_provider_vector_stores_config(
         provider: LlmProviders,
         api_type: str | None = None,
+        transport: object | None = None,
     ) -> BaseVectorStoreConfig | None:
         """
         v2 vector store config, use this for new vector store integrations
@@ -8993,6 +8994,12 @@ class ProviderConfigManager:
 
             return AzureAIVectorStoreConfig()
         elif litellm.LlmProviders.MILVUS == provider:
+            if transport == "grpc":
+                from litellm.llms.milvus.vector_stores.grpc_transformation import (
+                    MilvusGRPCVectorStoreConfig,
+                )
+
+                return MilvusGRPCVectorStoreConfig()
             from litellm.llms.milvus.vector_stores.transformation import (
                 MilvusVectorStoreConfig,
             )
