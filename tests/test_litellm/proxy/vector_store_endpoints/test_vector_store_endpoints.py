@@ -2801,6 +2801,74 @@ class TestUpdateVectorStoreAccessControlAndRedaction:
     """
 
     @pytest.mark.asyncio
+    async def test_proxy_admin_can_migrate_existing_store_to_milvus_grpc(self):
+        import json
+
+        from litellm.proxy.vector_store_endpoints.management_endpoints import update_vector_store
+        from litellm.types.vector_stores import VectorStoreUpdateRequest
+
+        existing_row = MagicMock()
+        existing_row.model_dump.return_value = {
+            "vector_store_id": "vs_owned",
+            "custom_llm_provider": "milvus",
+            "litellm_params": {
+                "api_base": "http://milvus-rest:9091",
+                "litellm_embedding_model": "embedding-alias",
+            },
+        }
+        updated_row = MagicMock()
+        updated_row.model_dump.return_value = {
+            "vector_store_id": "vs_owned",
+            "custom_llm_provider": "milvus",
+            "litellm_params": {
+                "api_base": "http://milvus:19530",
+                "milvus_transport": "grpc",
+                "litellm_embedding_model": "embedding-alias",
+                MILVUS_ADMIN_CONFIGURED_CONNECTION: True,
+            },
+        }
+        mock_prisma_client = MagicMock()
+        mock_prisma_client.db.litellm_managedvectorstorestable.find_unique = AsyncMock(return_value=existing_row)
+        mock_prisma_client.db.litellm_managedvectorstorestable.update = AsyncMock(return_value=updated_row)
+
+        with (
+            patch(  # test-quality-ok: endpoint auth has no injectable seam
+                "litellm.proxy.vector_store_endpoints.management_endpoints.check_feature_access_for_user",
+                new_callable=AsyncMock,
+            ),
+            patch(  # test-quality-ok: endpoint access check has no injectable seam
+                "litellm.proxy.vector_store_endpoints.management_endpoints._check_vector_store_access",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(  # test-quality-ok: endpoint reads the proxy database global
+                "litellm.proxy.proxy_server.prisma_client", mock_prisma_client
+            ),
+            patch(  # test-quality-ok: endpoint refreshes the global registry
+                "litellm.vector_store_registry", None
+            ),
+        ):
+            await update_vector_store(
+                data=VectorStoreUpdateRequest(
+                    vector_store_id="vs_owned",
+                    litellm_credential_name="milvus-credential",
+                    litellm_params={
+                        "api_base": "http://milvus:19530",
+                        "milvus_transport": "grpc",
+                    },
+                ),
+                user_api_key_dict=UserAPIKeyAuth(user_role=LitellmUserRoles.PROXY_ADMIN),
+            )
+
+        update_data = mock_prisma_client.db.litellm_managedvectorstorestable.update.await_args.kwargs["data"]
+        persisted_params = json.loads(update_data["litellm_params"])
+        assert persisted_params["api_base"] == "http://milvus:19530"
+        assert persisted_params["milvus_transport"] == "grpc"
+        assert persisted_params["litellm_embedding_model"] == "embedding-alias"
+        assert persisted_params[MILVUS_ADMIN_CONFIGURED_CONNECTION] is True
+        assert update_data["litellm_credential_name"] == "milvus-credential"
+
+    @pytest.mark.asyncio
     async def test_non_admin_cannot_activate_nested_milvus_grpc_connection(self):
         from litellm.proxy.vector_store_endpoints.management_endpoints import update_vector_store
         from litellm.types.vector_stores import VectorStoreUpdateRequest

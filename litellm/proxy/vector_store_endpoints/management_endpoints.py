@@ -10,6 +10,7 @@ All /vector_store management endpoints
 
 import copy
 import json
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Final
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -109,15 +110,15 @@ def _redact_sensitive_litellm_params(litellm_params: Any, _depth: int = 0) -> An
 
 
 def _validated_litellm_params(
-    litellm_params: dict[str, Any],
+    litellm_params: Mapping[str, object],
 ) -> dict[str, Any]:  # mutable-ok: persistence validation returns a serializable parameter dict
     from litellm.types.router import GenericLiteLLMParams
 
     trusted: Final = litellm_params.get(MILVUS_ADMIN_CONFIGURED_CONNECTION) is True
-    validated: Final = GenericLiteLLMParams(**litellm_params).model_dump(exclude_none=True)
-    if trusted:
-        validated[MILVUS_ADMIN_CONFIGURED_CONNECTION] = True
-    return validated
+    validated: Final = GenericLiteLLMParams.model_validate(litellm_params).model_dump(exclude_none=True)
+    marker_name: Final = MILVUS_ADMIN_CONFIGURED_CONNECTION
+    trusted_marker: Final = {marker_name: True} if trusted else {}  # mutable-ok: JSON persistence requires dict
+    return {**validated, **trusted_marker}  # mutable-ok: persistence requires a JSON-serializable dict
 
 
 def _litellm_params_dict(

@@ -184,11 +184,11 @@ class _MilvusSearchOptions(BaseModel):
     def result_limit(self) -> int:
         return self.max_num_results or self.limit
 
-    def output_fields_with_text(self, text_field: str) -> list[str]:
+    def output_fields_with_text(self, text_field: str) -> tuple[str, ...]:
         output_fields: Final = self.output_fields or ()
         if "*" in output_fields or text_field in output_fields:
-            return list(output_fields)
-        return [*output_fields, text_field]
+            return output_fields
+        return (*output_fields, text_field)
 
 
 class _EmbeddingItem(BaseModel):
@@ -336,6 +336,9 @@ class MilvusGRPCVectorStoreConfig(BaseDirectVectorStoreConfig):
         params: _MilvusSearchParams,
         timeout: float | None,
     ) -> object:
+        output_fields = list(  # mutable-ok: PyMilvus requires list output fields
+            options.output_fields_with_text(params.text_field)
+        )
         return client.search(
             collection_name=vector_store_id,
             data=[list(query_vector)],  # mutable-ok: PyMilvus requires nested list search data
@@ -344,7 +347,7 @@ class MilvusGRPCVectorStoreConfig(BaseDirectVectorStoreConfig):
             filter=options.filter_expression,
             offset=options.offset,
             group_by_field=options.grouping_field,
-            output_fields=options.output_fields_with_text(params.text_field),
+            output_fields=output_fields,
             search_params=dict(options.search_params)  # mutable-ok: PyMilvus requires dict search params
             if options.search_params is not None
             else None,
@@ -364,6 +367,9 @@ class MilvusGRPCVectorStoreConfig(BaseDirectVectorStoreConfig):
         params: _MilvusSearchParams,
         timeout: float | None,
     ) -> object:
+        output_fields = list(  # mutable-ok: PyMilvus requires list output fields
+            options.output_fields_with_text(params.text_field)
+        )
         return await client.search(
             collection_name=vector_store_id,
             data=[list(query_vector)],  # mutable-ok: PyMilvus requires nested list search data
@@ -372,7 +378,7 @@ class MilvusGRPCVectorStoreConfig(BaseDirectVectorStoreConfig):
             filter=options.filter_expression,
             offset=options.offset,
             group_by_field=options.grouping_field,
-            output_fields=options.output_fields_with_text(params.text_field),
+            output_fields=output_fields,
             search_params=dict(options.search_params)  # mutable-ok: PyMilvus requires dict search params
             if options.search_params is not None
             else None,
