@@ -310,6 +310,8 @@ async def new_vector_store(
             custom_llm_provider=custom_llm_provider,
             litellm_params=vector_store.get("litellm_params"),
             user_api_key_dict=user_api_key_dict,
+            litellm_credential_name=vector_store.get("litellm_credential_name"),
+            litellm_credential_name_supplied="litellm_credential_name" in vector_store,
         )
 
         # Extract and validate metadata
@@ -651,6 +653,9 @@ async def update_vector_store(
             user_api_key_dict=user_api_key_dict,
             existing_custom_llm_provider=existing_vector_store.get("custom_llm_provider"),
             existing_litellm_params=existing_litellm_params,
+            litellm_credential_name=update_data.get("litellm_credential_name"),
+            existing_litellm_credential_name=existing_vector_store.get("litellm_credential_name"),
+            litellm_credential_name_supplied="litellm_credential_name" in update_data,
         )
 
         # Handle metadata serialization

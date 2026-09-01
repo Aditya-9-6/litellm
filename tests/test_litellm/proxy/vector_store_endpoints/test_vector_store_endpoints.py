@@ -2916,6 +2916,66 @@ class TestUpdateVectorStoreAccessControlAndRedaction:
         assert exc_info.value.status_code == 403
         mock_prisma_client.db.litellm_managedvectorstorestable.update.assert_not_called()
 
+    @pytest.mark.parametrize(
+        "update_kwargs",
+        [
+            {"litellm_params": {"litellm_embedding_config": {"api_base": "http://attacker-embedding"}}},
+            {"litellm_params": {"litellm_embedding_model": "openai/attacker-model"}},
+            {"litellm_params": {"milvus_text_field": "attacker_controlled_field"}},
+            {"litellm_credential_name": "attacker-credential"},
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_non_admin_cannot_replace_managed_grpc_execution_configuration(self, update_kwargs):
+        from litellm.proxy.vector_store_endpoints.management_endpoints import update_vector_store
+        from litellm.types.vector_stores import VectorStoreUpdateRequest
+
+        existing_row = MagicMock()
+        existing_row.model_dump.return_value = {
+            "vector_store_id": "vs_owned",
+            "custom_llm_provider": "milvus",
+            "team_id": "team-A",
+            "litellm_credential_name": "trusted-credential",
+            "litellm_params": {
+                "milvus_transport": "grpc",
+                "api_base": "http://trusted-milvus:19530",
+                "litellm_embedding_model": "trusted-embedding-alias",
+                "litellm_embedding_config": {"api_base": "http://trusted-embedding"},
+                "milvus_text_field": "text",
+                MILVUS_ADMIN_CONFIGURED_CONNECTION: True,
+            },
+        }
+        mock_prisma_client = MagicMock()
+        mock_prisma_client.db.litellm_managedvectorstorestable.find_unique = AsyncMock(return_value=existing_row)
+
+        with (
+            patch(  # test-quality-ok: isolates managed-configuration authorization from feature entitlement
+                "litellm.proxy.vector_store_endpoints.management_endpoints.check_feature_access_for_user",
+                new_callable=AsyncMock,
+            ),
+            patch(  # test-quality-ok: fixes ownership so the test reaches managed-configuration authorization
+                "litellm.proxy.vector_store_endpoints.management_endpoints._check_vector_store_access",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(  # test-quality-ok: injects the persisted trusted gRPC store
+                "litellm.proxy.proxy_server.prisma_client", mock_prisma_client
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await update_vector_store(
+                data=VectorStoreUpdateRequest(vector_store_id="vs_owned", **update_kwargs),
+                user_api_key_dict=UserAPIKeyAuth(
+                    user_id="owner",
+                    team_id="team-A",
+                    user_role=LitellmUserRoles.INTERNAL_USER,
+                ),
+            )
+
+        assert exc_info.value.status_code == 403
+        assert "Only proxy admins" in str(exc_info.value.detail)
+        mock_prisma_client.db.litellm_managedvectorstorestable.update.assert_not_called()
+
     @pytest.mark.asyncio
     async def test_update_denied_when_caller_cannot_access_store(self):
         from unittest.mock import AsyncMock, MagicMock, patch
