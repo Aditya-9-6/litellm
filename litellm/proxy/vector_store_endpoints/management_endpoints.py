@@ -10,7 +10,6 @@ All /vector_store management endpoints
 
 import copy
 import json
-from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Final
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -38,6 +37,7 @@ from litellm.proxy.vector_store_endpoints.utils import (
 )
 from litellm.repositories.prisma_protocols import TableActions
 from litellm.repositories.table_repositories import ManagedVectorStoresRepository
+from litellm.types.router import GenericLiteLLMParams
 from litellm.types.vector_stores import (
     LiteLLM_ManagedVectorStore,
     LiteLLM_ManagedVectorStoreListResponse,
@@ -107,18 +107,6 @@ def _redact_sensitive_litellm_params(litellm_params: Any, _depth: int = 0) -> An
         else:
             out[k] = v
     return out
-
-
-def _validated_litellm_params(
-    litellm_params: Mapping[str, object],
-) -> dict[str, Any]:  # mutable-ok: persistence validation returns a serializable parameter dict
-    from litellm.types.router import GenericLiteLLMParams
-
-    trusted: Final = litellm_params.get(MILVUS_ADMIN_CONFIGURED_CONNECTION) is True
-    validated: Final = GenericLiteLLMParams.model_validate(litellm_params).model_dump(exclude_none=True)
-    marker_name: Final = MILVUS_ADMIN_CONFIGURED_CONNECTION
-    trusted_marker: Final = {marker_name: True} if trusted else {}  # mutable-ok: JSON persistence requires dict
-    return {**validated, **trusted_marker}  # mutable-ok: persistence requires a JSON-serializable dict
 
 
 def _litellm_params_dict(
@@ -250,7 +238,7 @@ async def create_vector_store_in_db(
     # at request-handling time so the cleartext config exists only in
     # per-request memory and never reaches the database.
     if litellm_params:
-        litellm_params_dict: Final = _validated_litellm_params(litellm_params)
+        litellm_params_dict: Final = GenericLiteLLMParams.model_validate(litellm_params).model_dump(exclude_none=True)
         data_to_create["litellm_params"] = safe_dumps(litellm_params_dict)
     else:
         # Provide empty dict if no litellm_params provided
@@ -670,7 +658,9 @@ async def update_vector_store(
         # so this row only ever stores the user-supplied
         # ``litellm_embedding_model`` reference.
         if "litellm_params" in update_data or effective_litellm_params != existing_litellm_params:
-            update_data["litellm_params"] = safe_dumps(_validated_litellm_params(effective_litellm_params))
+            update_data["litellm_params"] = safe_dumps(
+                GenericLiteLLMParams.model_validate(effective_litellm_params).model_dump(exclude_none=True)
+            )
 
         # Update in database
         updated: Final = await _vector_store_table(prisma_client).update(

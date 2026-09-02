@@ -1,11 +1,11 @@
 import typing
-from collections.abc import Awaitable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
-from typing_extensions import Protocol
+from typing_extensions import Protocol, ReadOnly, TypedDict, Unpack
 
 import litellm
 from litellm.llms.base_llm.vector_store.transformation import (
@@ -35,21 +35,25 @@ _MILVUS_ENTITY_ADAPTER: Final = TypeAdapter(Mapping[str, object])
 _STRING_KEYS_ADAPTER: Final = TypeAdapter(tuple[str, ...])
 
 
+class _MilvusSearchRequest(TypedDict):
+    collection_name: ReadOnly[str]
+    data: ReadOnly[list[list[float]]]  # mutable-ok: PyMilvus requires nested list search data
+    anns_field: ReadOnly[str | None]
+    limit: ReadOnly[int]
+    filter: ReadOnly[str]
+    offset: ReadOnly[int | None]
+    group_by_field: ReadOnly[str | None]
+    output_fields: ReadOnly[list[str]]  # mutable-ok: PyMilvus requires list output fields
+    search_params: ReadOnly[dict[str, object] | None]  # mutable-ok: PyMilvus requires dict search params
+    consistency_level: ReadOnly[str | None]
+    partition_names: ReadOnly[list[str] | None]  # mutable-ok: PyMilvus requires list partition names
+    timeout: ReadOnly[float | None]
+
+
 class _SyncMilvusClient(Protocol):
     def search(
         self,
-        collection_name: str,
-        data: list[list[float]],  # mutable-ok: PyMilvus requires nested list search data
-        anns_field: str | None,
-        limit: int,
-        filter: str,
-        offset: int | None,
-        group_by_field: str | None,
-        output_fields: list[str] | None,  # mutable-ok: PyMilvus requires list output fields
-        search_params: dict[str, object] | None,  # mutable-ok: PyMilvus requires dict search params
-        consistency_level: str | None,
-        partition_names: list[str] | None,  # mutable-ok: PyMilvus requires list partition names
-        timeout: float | None,
+        **kwargs: Unpack[_MilvusSearchRequest],  # kwargs-ok: typed PyMilvus keyword contract
     ) -> object: ...
 
     def close(self) -> None: ...
@@ -58,29 +62,10 @@ class _SyncMilvusClient(Protocol):
 class _AsyncMilvusClient(Protocol):
     async def search(
         self,
-        collection_name: str,
-        data: list[list[float]],  # mutable-ok: PyMilvus requires nested list search data
-        anns_field: str | None,
-        limit: int,
-        filter: str,
-        offset: int | None,
-        group_by_field: str | None,
-        output_fields: list[str] | None,  # mutable-ok: PyMilvus requires list output fields
-        search_params: dict[str, object] | None,  # mutable-ok: PyMilvus requires dict search params
-        consistency_level: str | None,
-        partition_names: list[str] | None,  # mutable-ok: PyMilvus requires list partition names
-        timeout: float | None,
+        **kwargs: Unpack[_MilvusSearchRequest],  # kwargs-ok: typed PyMilvus keyword contract
     ) -> object: ...
 
     async def close(self) -> None: ...
-
-
-class _EmbeddingFunction(Protocol):
-    def __call__(self, model: str, query: str, config: Mapping[str, object]) -> object: ...
-
-
-class _AsyncEmbeddingFunction(Protocol):
-    def __call__(self, model: str, query: str, config: Mapping[str, object]) -> Awaitable[object]: ...
 
 
 def _embedding(model: str, query: str, config: Mapping[str, object]) -> object:
@@ -213,8 +198,8 @@ class MilvusGRPCVectorStoreConfig(BaseDirectVectorStoreConfig):
         self,
         sync_client: _SyncMilvusClient | None = None,
         async_client: _AsyncMilvusClient | None = None,
-        embedding_fn: _EmbeddingFunction | None = None,
-        aembedding_fn: _AsyncEmbeddingFunction | None = None,
+        embedding_fn: Callable[[str, str, Mapping[str, object]], object] | None = None,
+        aembedding_fn: Callable[[str, str, Mapping[str, object]], Awaitable[object]] | None = None,
     ) -> None:
         super().__init__()
         self.sync_client = sync_client
@@ -235,7 +220,7 @@ class MilvusGRPCVectorStoreConfig(BaseDirectVectorStoreConfig):
 
     @staticmethod
     def _search_options(
-        optional_params: VectorStoreSearchOptionalRequestParams,
+        optional_params: Mapping[str, object],
     ) -> _MilvusSearchOptions:
         for parameter in ("filters", "ranking_options", "rewrite_query"):
             if optional_params.get(parameter) is not None:
@@ -328,18 +313,15 @@ class MilvusGRPCVectorStoreConfig(BaseDirectVectorStoreConfig):
         )
 
     @staticmethod
-    def _sync_search(
-        client: _SyncMilvusClient,
+    def _search_request(
         vector_store_id: str,
-        query_vector: Sequence[float],
+        embedding_response: object,
         options: _MilvusSearchOptions,
         params: _MilvusSearchParams,
         timeout: float | None,
-    ) -> object:
-        output_fields = list(  # mutable-ok: PyMilvus requires list output fields
-            options.output_fields_with_text(params.text_field)
-        )
-        return client.search(
+    ) -> _MilvusSearchRequest:
+        query_vector: Final = _EmbeddingPayload.model_validate(embedding_response).vector()
+        return _MilvusSearchRequest(
             collection_name=vector_store_id,
             data=[list(query_vector)],  # mutable-ok: PyMilvus requires nested list search data
             anns_field=options.anns_field,
@@ -347,38 +329,9 @@ class MilvusGRPCVectorStoreConfig(BaseDirectVectorStoreConfig):
             filter=options.filter_expression,
             offset=options.offset,
             group_by_field=options.grouping_field,
-            output_fields=output_fields,
-            search_params=dict(options.search_params)  # mutable-ok: PyMilvus requires dict search params
-            if options.search_params is not None
-            else None,
-            consistency_level=options.consistency_level,
-            partition_names=list(params.milvus_partition_names)  # mutable-ok: PyMilvus requires list partition names
-            if params.milvus_partition_names is not None
-            else None,
-            timeout=timeout,
-        )
-
-    @staticmethod
-    async def _async_search(
-        client: _AsyncMilvusClient,
-        vector_store_id: str,
-        query_vector: Sequence[float],
-        options: _MilvusSearchOptions,
-        params: _MilvusSearchParams,
-        timeout: float | None,
-    ) -> object:
-        output_fields = list(  # mutable-ok: PyMilvus requires list output fields
-            options.output_fields_with_text(params.text_field)
-        )
-        return await client.search(
-            collection_name=vector_store_id,
-            data=[list(query_vector)],  # mutable-ok: PyMilvus requires nested list search data
-            anns_field=options.anns_field,
-            limit=options.result_limit,
-            filter=options.filter_expression,
-            offset=options.offset,
-            group_by_field=options.grouping_field,
-            output_fields=output_fields,
+            output_fields=list(  # mutable-ok: PyMilvus requires list output fields
+                options.output_fields_with_text(params.text_field)
+            ),
             search_params=dict(options.search_params)  # mutable-ok: PyMilvus requires dict search params
             if options.search_params is not None
             else None,
@@ -402,45 +355,23 @@ class MilvusGRPCVectorStoreConfig(BaseDirectVectorStoreConfig):
         params: Final = _MilvusSearchParams.model_validate(litellm_params)
         options: Final = self._search_options(vector_store_search_optional_params)
         query_text: Final = self._query_text(query)
-        embedding_response: Final = (
-            embedding_executor.embed(
-                params.require_embedding_model(),
-                query_text,
-                params.litellm_embedding_config or _EMPTY_EMBEDDING_CONFIG,
-            )
-            if embedding_executor is not None
-            else self.embedding_fn(
-                params.require_embedding_model(),
-                query_text,
-                params.litellm_embedding_config or _EMPTY_EMBEDDING_CONFIG,
-            )
+        embed: Final = embedding_executor.embed if embedding_executor is not None else self.embedding_fn
+        embedding_response: Final = embed(
+            params.require_embedding_model(), query_text, params.litellm_embedding_config or _EMPTY_EMBEDDING_CONFIG
         )
-        query_vector: Final = _EmbeddingPayload.model_validate(embedding_response).vector()
         connection_timeout, search_timeout = self._timeouts(timeout)
-        if self.sync_client is not None:
-            raw_result: Final = self._sync_search(
-                self.sync_client,
-                vector_store_id,
-                query_vector,
-                options,
-                params,
-                search_timeout,
-            )
-            return self._to_response(raw_result, query_text, params.text_field)
-
-        client: Final = _new_sync_client(params.uri, params.token, params.db_name, connection_timeout)
+        request: Final = self._search_request(vector_store_id, embedding_response, options, params, search_timeout)
+        client: Final = (
+            self.sync_client
+            if self.sync_client is not None
+            else _new_sync_client(params.uri, params.token, params.db_name, connection_timeout)
+        )
         try:
-            result: Final = self._sync_search(
-                client,
-                vector_store_id,
-                query_vector,
-                options,
-                params,
-                search_timeout,
-            )
+            result: Final = client.search(**request)
             return self._to_response(result, query_text, params.text_field)
         finally:
-            client.close()
+            if self.sync_client is None:
+                client.close()
 
     async def aexecute_search_vector_store_request(
         self,
@@ -455,42 +386,20 @@ class MilvusGRPCVectorStoreConfig(BaseDirectVectorStoreConfig):
         params: Final = _MilvusSearchParams.model_validate(litellm_params)
         options: Final = self._search_options(vector_store_search_optional_params)
         query_text: Final = self._query_text(query)
-        embedding_response: Final = (
-            await embedding_executor.aembed(
-                params.require_embedding_model(),
-                query_text,
-                params.litellm_embedding_config or _EMPTY_EMBEDDING_CONFIG,
-            )
-            if embedding_executor is not None
-            else await self.aembedding_fn(
-                params.require_embedding_model(),
-                query_text,
-                params.litellm_embedding_config or _EMPTY_EMBEDDING_CONFIG,
-            )
+        embed: Final = embedding_executor.aembed if embedding_executor is not None else self.aembedding_fn
+        embedding_response: Final = await embed(
+            params.require_embedding_model(), query_text, params.litellm_embedding_config or _EMPTY_EMBEDDING_CONFIG
         )
-        query_vector: Final = _EmbeddingPayload.model_validate(embedding_response).vector()
         connection_timeout, search_timeout = self._timeouts(timeout)
-        if self.async_client is not None:
-            raw_result: Final = await self._async_search(
-                self.async_client,
-                vector_store_id,
-                query_vector,
-                options,
-                params,
-                search_timeout,
-            )
-            return self._to_response(raw_result, query_text, params.text_field)
-
-        client: Final = _new_async_client(params.uri, params.token, params.db_name, connection_timeout)
+        request: Final = self._search_request(vector_store_id, embedding_response, options, params, search_timeout)
+        client: Final = (
+            self.async_client
+            if self.async_client is not None
+            else _new_async_client(params.uri, params.token, params.db_name, connection_timeout)
+        )
         try:
-            result: Final = await self._async_search(
-                client,
-                vector_store_id,
-                query_vector,
-                options,
-                params,
-                search_timeout,
-            )
+            result: Final = await client.search(**request)
             return self._to_response(result, query_text, params.text_field)
         finally:
-            await client.close()
+            if self.async_client is None:
+                await client.close()

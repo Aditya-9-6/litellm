@@ -28,6 +28,7 @@ from litellm.types.utils import (
     StandardLoggingVectorStoreRequest,
 )
 from litellm.types.vector_stores import (
+    MILVUS_ADMIN_CONFIGURED_CONNECTION,
     VectorStoreSearchResponse,
     VectorStoreResultContent,
     VectorStoreSearchResult,
@@ -72,9 +73,25 @@ def setup_vector_store_registry():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provider, params, allowed",
+    [
+        ("bedrock", {}, True),
+        ("milvus", {"milvus_transport": "rest"}, True),
+        ("milvus", {"milvus_transport": "grpc"}, False),
+        ("milvus/probe", {"milvus_transport": "grpc"}, False),
+        ("openai", {"custom_llm_provider": "milvus", "milvus_transport": "grpc"}, False),
+        ("milvus", {"milvus_transport": "grpc", MILVUS_ADMIN_CONFIGURED_CONNECTION: True}, True),
+    ],
+)
 async def test_vector_store_hook_routes_search_through_proxy_router(
-    setup_vector_store_registry,
+    provider, params, allowed,
 ):
+    from litellm.vector_stores.vector_store_registry import VectorStoreRegistry
+
+    registry = VectorStoreRegistry(vector_stores=[{
+        "vector_store_id": "T37J8R4WTM", "custom_llm_provider": provider, "litellm_params": params,
+    }])
     proxy_router = Mock()
     proxy_router.avector_store_search = AsyncMock(
         return_value=VectorStoreSearchResponse(
@@ -93,7 +110,11 @@ async def test_vector_store_hook_routes_search_through_proxy_router(
         "litellm_params": {"metadata": {"user_api_key_team_id": "team-a"}}
     }
 
-    with patch("litellm.proxy.proxy_server.llm_router", proxy_router):
+    with (
+        patch("litellm.proxy.proxy_server.llm_router", proxy_router),
+        patch("litellm.proxy.proxy_server.prisma_client", None),
+        patch.object(litellm, "vector_store_registry", registry),
+    ):
         _, messages, _ = await VectorStorePreCallHook().async_get_chat_completion_prompt(
             model="chat-model",
             messages=[{"role": "user", "content": "what is litellm?"}],
@@ -104,11 +125,17 @@ async def test_vector_store_hook_routes_search_through_proxy_router(
             litellm_logging_obj=logging_obj,
         )
 
+    if not allowed:
+        proxy_router.avector_store_search.assert_not_awaited()
+        assert messages == [{"role": "user", "content": "what is litellm?"}]
+        return
+
     proxy_router.avector_store_search.assert_awaited_once_with(
         vector_store_id="T37J8R4WTM",
         query="what is litellm?",
-        custom_llm_provider="bedrock",
+        custom_llm_provider=provider,
         metadata={"user_api_key_team_id": "team-a"},
+        **params,
     )
     assert messages[0]["content"] == "Context:\n\nrouted context\n\n"
 

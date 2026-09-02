@@ -2,8 +2,11 @@
 Tests for Milvus Vector Store
 """
 
+import asyncio
 import json
-from typing import cast
+from contextlib import nullcontext
+from functools import partial
+from typing import Final, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -444,26 +447,39 @@ class TestMilvusVectorStore:
                 assert request_data["dbName"] == "tenant_a_db"
                 assert request_data["partitionNames"] == ["tenant_a_partition"]
 
-    def test_grpc_search_uses_pymilvus_client(self):
-        mock_client = MagicMock()
-        mock_client.search.return_value = [[MockPyMilvusHit(id=7, distance=0.91, entity={})]]
-        mock_embedding = MagicMock(return_value=MOCK_EMBEDDING_RESPONSE)
-        config = MilvusGRPCVectorStoreConfig(sync_client=mock_client, embedding_fn=mock_embedding)
-        response = config.execute_search_vector_store_request(
-            query="what is machine learning?",
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("async_mode", (False, True))
+    @pytest.mark.parametrize("output_fields", (("*",), ("category",)))
+    async def test_grpc_search_options_match_across_sync_and_async(
+        self, async_mode: bool, output_fields: tuple[str, ...]
+    ) -> None:
+        mock_search: Final = (AsyncMock if async_mode else MagicMock)(
+            return_value=[[MockPyMilvusHit(id=7, distance=0.91, entity={})]]
+        )
+        mock_client: Final = MagicMock(search=mock_search, close=(AsyncMock if async_mode else MagicMock)())
+        mock_embedding: Final = (AsyncMock if async_mode else MagicMock)(return_value=MOCK_EMBEDDING_RESPONSE)
+        config: Final = MilvusGRPCVectorStoreConfig(embedding_fn=mock_embedding, aembedding_fn=mock_embedding)
+        search: Final = partial(
+            config.aexecute_search_vector_store_request if async_mode else config.execute_search_vector_store_request,
+            query=("what is", "machine learning?"),
             vector_store_id="book_2",
             vector_store_search_optional_params=cast(
                 VectorStoreSearchOptionalRequestParams,
                 {
-                    "outputFields": ["book_intro_text", "category"],
+                    "outputFields": output_fields,
                     "annsField": "book_intro_vector",
                     "limit": 3,
+                    "max_num_results": 2,
                     "filter": 'category == "reference"',
+                    "offset": 1,
+                    "groupingField": "category",
+                    "searchParams": {"metric_type": "COSINE", "params": {"nprobe": 8}},
+                    "consistencyLevel": "Strong",
                 },
             ),
             litellm_logging_obj=MagicMock(),
             litellm_params={
-                "api_base": "https://milvus.example.com:19530",
+                "api_base": "https://milvus.example.com:19530/",
                 "api_key": "mock_milvus_api_key",
                 "litellm_embedding_model": "text-embedding-3-large",
                 "litellm_embedding_config": {"api_key": "mock_openai_api_key"},
@@ -471,31 +487,50 @@ class TestMilvusVectorStore:
                 "milvus_db_name": "tenant_a_db",
                 "milvus_partition_names": ["tenant_a_partition"],
             },
+            timeout=httpx.Timeout(connect=3, read=11, write=13, pool=17),
         )
+        with patch(
+            "pymilvus.AsyncMilvusClient" if async_mode else "pymilvus.MilvusClient", return_value=mock_client
+        ) as client_class:
+            response: Final = await search() if async_mode else search()
 
-        mock_embedding.assert_called_once_with(
-            "text-embedding-3-large",
-            "what is machine learning?",
-            {"api_key": "mock_openai_api_key"},
+        client_class.assert_called_once_with(
+            uri="https://milvus.example.com:19530",
+            token="mock_milvus_api_key",
+            db_name="tenant_a_db",
+            timeout=3,
+            dedicated=True,
         )
-        mock_client.search.assert_called_once()
-        search_kwargs = mock_client.search.call_args.kwargs
-        assert search_kwargs["collection_name"] == "book_2"
-        assert search_kwargs["anns_field"] == "book_intro_vector"
-        assert search_kwargs["limit"] == 3
-        assert search_kwargs["filter"] == 'category == "reference"'
-        assert search_kwargs["output_fields"] == ["book_intro_text", "category"]
-        assert search_kwargs["partition_names"] == ["tenant_a_partition"]
-        assert response["search_query"] == "what is machine learning?"
-        assert response["data"] == [
-            {
-                "score": 0.91,
-                "content": [{"text": "closest result", "type": "text"}],
-                "file_id": None,
-                "filename": None,
-                "attributes": {"category": "reference"},
-            }
-        ]
+        mock_embedding.assert_called_once_with(
+            "text-embedding-3-large", "what is machine learning?", {"api_key": "mock_openai_api_key"}
+        )
+        mock_search.assert_called_once_with(
+            collection_name="book_2",
+            data=[MOCK_EMBEDDING_RESPONSE.data[0]["embedding"]],
+            anns_field="book_intro_vector",
+            limit=2,
+            filter='category == "reference"',
+            offset=1,
+            group_by_field="category",
+            output_fields=["*"] if output_fields == ("*",) else ["category", "book_intro_text"],
+            search_params={"metric_type": "COSINE", "params": {"nprobe": 8}},
+            consistency_level="Strong",
+            partition_names=["tenant_a_partition"],
+            timeout=11,
+        )
+        assert response == {
+            "object": "vector_store.search_results.page",
+            "search_query": "what is machine learning?",
+            "data": [
+                {
+                    "score": 0.91,
+                    "content": [{"text": "closest result", "type": "text"}],
+                    "file_id": None,
+                    "filename": None,
+                    "attributes": {"category": "reference"},
+                }
+            ],
+        }
 
     @pytest.mark.asyncio
     async def test_async_grpc_search_infers_vector_field_and_requests_text_by_default(self):
@@ -713,40 +748,57 @@ class TestMilvusVectorStore:
         assert response["data"][0]["content"][0]["text"] == "secured result"
 
     @pytest.mark.asyncio
-    async def test_async_grpc_uses_distinct_timeouts_and_releases_dedicated_client(self):
-        mock_client = MagicMock()
-        mock_client.search = AsyncMock(return_value=[[]])
-        mock_client.close = AsyncMock()
-        embedding_executor = MagicMock()
-        embedding_executor.aembed = AsyncMock(return_value=MOCK_EMBEDDING_RESPONSE)
-        timeout = httpx.Timeout(connect=3, read=11, write=13, pool=17)
-
-        with patch("pymilvus.AsyncMilvusClient", return_value=mock_client) as client_class:
-            response = await MilvusGRPCVectorStoreConfig().aexecute_search_vector_store_request(
-                query="transport probe",
-                vector_store_id="documents",
-                vector_store_search_optional_params={},
-                litellm_logging_obj=MagicMock(),
-                litellm_params={
-                    "api_base": "http://milvus.example.com:19530",
-                    "api_key": "root:Milvus",
-                    "litellm_embedding_model": "embedding-alias",
-                },
-                embedding_executor=embedding_executor,
-                timeout=timeout,
-            )
-
-        client_class.assert_called_once_with(
-            uri="http://milvus.example.com:19530",
-            token="root:Milvus",
-            db_name="",
-            timeout=3,
-            dedicated=True,
+    @pytest.mark.parametrize("injected", (False, True))
+    @pytest.mark.parametrize(
+        ("async_mode", "error"),
+        ((False, None), (True, None), (False, RuntimeError), (True, RuntimeError), (True, asyncio.CancelledError)),
+    )
+    async def test_grpc_client_ownership_on_success_error_and_cancellation(
+        self, injected: bool, async_mode: bool, error: type[BaseException] | None
+    ) -> None:
+        mock_client: Final = MagicMock(
+            search=(AsyncMock if async_mode else MagicMock)(return_value=[[]], side_effect=error),
+            close=(AsyncMock if async_mode else MagicMock)(),
         )
-        assert mock_client.search.await_args.kwargs["timeout"] == 11
-        assert response["data"] == []
-        embedding_executor.aembed.assert_awaited_once_with("embedding-alias", "transport probe", {})
-        mock_client.close.assert_awaited_once_with()
+        embedding_executor: Final = MagicMock(
+            embed=MagicMock(return_value=MOCK_EMBEDDING_RESPONSE),
+            aembed=AsyncMock(return_value=MOCK_EMBEDDING_RESPONSE),
+        )
+        config: Final = MilvusGRPCVectorStoreConfig(
+            sync_client=mock_client if injected and not async_mode else None,
+            async_client=mock_client if injected and async_mode else None,
+        )
+        search: Final = partial(
+            config.aexecute_search_vector_store_request if async_mode else config.execute_search_vector_store_request,
+            query="transport probe",
+            vector_store_id="documents",
+            vector_store_search_optional_params={},
+            litellm_logging_obj=MagicMock(),
+            litellm_params={
+                "api_base": "http://milvus.example.com:19530",
+                "litellm_embedding_model": "embedding-alias",
+            },
+            embedding_executor=embedding_executor,
+        )
+        with (
+            patch(
+                "pymilvus.AsyncMilvusClient" if async_mode else "pymilvus.MilvusClient", return_value=mock_client
+            ) as client_class,
+            pytest.raises(error) if error else nullcontext(),
+        ):
+            response: Final = await search() if async_mode else search()
+            assert response["data"] == []
+
+        assert client_class.call_count == (0 if injected else 1)
+        if injected:
+            mock_client.close.assert_not_called()
+        elif async_mode:
+            mock_client.close.assert_awaited_once_with()
+        else:
+            mock_client.close.assert_called_once_with()
+        (embedding_executor.aembed if async_mode else embedding_executor.embed).assert_called_once_with(
+            "embedding-alias", "transport probe", {}
+        )
 
     def test_http_and_https_targets_get_distinct_dedicated_clients(self):
         clients = [MagicMock(), MagicMock()]
