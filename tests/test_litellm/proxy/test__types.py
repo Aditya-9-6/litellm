@@ -10,7 +10,9 @@ from litellm.proxy._types import (
     LiteLLM_AuditLogs,
     LiteLLM_TeamMembership,
     LitellmUserRoles,
+    NewUserRequest,
     OrganizationMemberUpdateRequest,
+    PasswordPolicy,
     ResetSpendRequest,
     UpdateKeyRequest,
     UpdateUserRequest,
@@ -277,3 +279,30 @@ def test_team_membership_budget_table_present_still_works():
     }
     result = LiteLLM_TeamMembership.model_validate(data)
     assert result.litellm_budget_table is None
+
+
+def test_password_policy_defaults_to_nist_recommended_values():
+    policy = PasswordPolicy()
+    assert policy.min_length == 12
+    assert policy.check_breached_passwords is True
+
+
+def test_password_policy_rejects_min_length_below_nist_floor():
+    with pytest.raises(ValidationError):
+        PasswordPolicy(min_length=7)
+    assert PasswordPolicy(min_length=8).min_length == 8
+
+
+def test_new_user_request_loudly_rejects_a_password():
+    """
+    /user/new has never persisted a password (the field used to be silently
+    dropped). Sending one must now fail visibly so the dead path cannot be
+    revived without going through the password policy.
+    """
+    with pytest.raises(ValidationError, match="invitation link"):
+        NewUserRequest(user_email="alice@example.com", password="hunter2hunter2")
+
+
+def test_new_user_request_without_password_still_works():
+    request = NewUserRequest(user_email="alice@example.com")
+    assert request.password is None

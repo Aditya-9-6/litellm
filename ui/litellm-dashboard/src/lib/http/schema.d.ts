@@ -25663,6 +25663,8 @@ export interface components {
              * @description Default upstream request timeout in seconds for native and custom pass-through endpoints that use pass_through_request. Defaults to 600 when unset.
              */
             pass_through_request_timeout?: number | null;
+            /** @description password rules for UI users: minimum length and breached-password screening */
+            password_policy?: components["schemas"]["PasswordPolicy"] | null;
             /**
              * Plugins
              * @description external services registered as embeddable UI plugins
@@ -32152,6 +32154,8 @@ export interface components {
             object_permission?: components["schemas"]["LiteLLM_ObjectPermissionBase"] | null;
             /** Organizations */
             organizations?: string[] | null;
+            /** Password */
+            password?: string | null;
             /**
              * Permissions
              * @default {}
@@ -32674,6 +32678,24 @@ export interface components {
              * @description JSONPath expressions for output field targeting (post_call). Examples: 'results[*].text', 'output'. If not specified, guardrail runs on entire response payload.
              */
             response_fields?: string[] | null;
+        };
+        /**
+         * PasswordPolicy
+         * @description Server-side rules applied whenever a UI user sets a new password
+         */
+        PasswordPolicy: {
+            /**
+             * Check Breached Passwords
+             * @description reject passwords found in known data breaches, via the haveibeenpwned.com k-anonymity range API (only the first 5 chars of the password's SHA-1 leave the proxy); fails open if unreachable
+             * @default true
+             */
+            check_breached_passwords: boolean;
+            /**
+             * Min Length
+             * @description minimum password length; NIST SP 800-63B forbids going below 8
+             * @default 12
+             */
+            min_length: number;
         };
         /** PatchAgentRequest */
         PatchAgentRequest: {

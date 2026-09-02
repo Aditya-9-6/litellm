@@ -94,6 +94,7 @@ from litellm.proxy._types import (
     LiteLLM_UserTable,
     LitellmUserRoles,
     PassThroughGenericEndpoint,
+    PasswordPolicy,
     ProxyErrorTypes,
     ProxyException,
     RoleBasedPermissions,
@@ -307,6 +308,11 @@ from litellm.proxy.auth.model_checks import (
     get_key_models,
     get_mcp_server_ids,
     get_team_models,
+)
+from litellm.proxy.auth.password_policy import (
+    get_password_policy,
+    raise_password_validation_error,
+    validate_new_password,
 )
 from litellm.proxy.auth.user_api_key_auth import (
     _fetch_global_spend_with_event_coordination,
@@ -5622,6 +5628,11 @@ class ProxyConfig:
                 general_settings["role_permissions"] = [  # validate role permissions
                     RoleBasedPermissions(**role_permission) for role_permission in rbac_role_permissions
                 ]
+
+            ### PASSWORD POLICY ###
+            raw_password_policy: Final = general_settings.get("password_policy", None)
+            if raw_password_policy is not None:
+                general_settings["password_policy"] = PasswordPolicy.model_validate(raw_password_policy)
 
             ### SSRF URL VALIDATION SETTINGS ###
             _apply_ssrf_general_settings(general_settings)
@@ -15739,6 +15750,12 @@ async def claim_onboarding_link(data: InvitationClaim, request: Request):
             status_code=401,
             detail={"error": "Invalid onboarding session for invitation link."},
         )
+
+    password_failure: Final = await validate_new_password(
+        password=data.password, policy=get_password_policy(general_settings)
+    )
+    if password_failure is not None:
+        raise_password_validation_error(password_failure)
 
     hashed_pw: Final = hash_password(data.password)
     current_time = litellm.utils.get_utc_datetime()

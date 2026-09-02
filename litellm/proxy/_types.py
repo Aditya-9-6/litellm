@@ -1717,6 +1717,17 @@ class NewUserRequest(GenerateRequestBase):
     send_invite_email: bool | None = None
     sso_user_id: str | None = None
     organizations: list[str] | None = None
+    password: str | None = None
+
+    @field_validator("password")
+    @classmethod
+    def password_not_supported(cls, value: str | None) -> str | None:
+        if value is not None:
+            raise ValueError(
+                "password cannot be set via /user/new. Users set their own password through an "
+                "invitation link (POST /invitation/new)."
+            )
+        return value
 
 
 class NewUserResponse(GenerateKeyResponse):
@@ -2384,12 +2395,35 @@ class ScheduledJobStaggerSettings(LiteLLMPydanticObjectBase):
     )
 
 
+class PasswordPolicy(LiteLLMPydanticObjectBase):
+    """
+    Server-side rules applied whenever a UI user sets a new password
+    """
+
+    min_length: int = Field(
+        default=12,
+        ge=8,
+        description="minimum password length; NIST SP 800-63B forbids going below 8",
+    )
+    check_breached_passwords: bool = Field(
+        default=True,
+        description=(
+            "reject passwords found in known data breaches, via the haveibeenpwned.com k-anonymity range API "
+            "(only the first 5 chars of the password's SHA-1 leave the proxy); fails open if unreachable"
+        ),
+    )
+
+
 class ConfigGeneralSettings(LiteLLMPydanticObjectBase):
     """
     Documents all the fields supported by `general_settings` in config.yaml
     """
 
     completion_model: str | None = Field(None, description="proxy level default model for all chat completion calls")
+    password_policy: PasswordPolicy | None = Field(
+        None,
+        description="password rules for UI users: minimum length and breached-password screening",
+    )
     plugins: list[PluginConfig] | None = Field(
         None, description="external services registered as embeddable UI plugins"
     )
