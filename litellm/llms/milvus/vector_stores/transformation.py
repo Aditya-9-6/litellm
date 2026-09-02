@@ -37,16 +37,6 @@ MILVUS_OPTIONAL_PARAMS: Final = {
 
 
 class MilvusVectorStoreConfig(BaseVectorStoreConfig):
-    """
-    Configuration for Milvus Vector Store
-
-    This implementation uses the Azure AI Search API for vector store operations.
-    Supports vector search with embeddings generated via litellm.embeddings.
-    """
-
-    def __init__(self):
-        super().__init__()
-
     def validate_environment(self, headers: dict, litellm_params: GenericLiteLLMParams | None) -> dict:
         api_key: str | None = None
         if litellm_params is not None:
@@ -191,73 +181,30 @@ class MilvusVectorStoreConfig(BaseVectorStoreConfig):
     def transform_search_vector_store_response(
         self, response: httpx.Response, litellm_logging_obj: LiteLLMLoggingObj
     ) -> VectorStoreSearchResponse:
-        """
-        Transform Azure AI Search API response to standard vector store search response
-
-        Handles the format from Azure AI Search which returns:
-        {
-            "value": [
-                {
-                    "id": "...",
-                    "content": "...",
-                    "distance": 0.95,
-                }
-            ]
-        }
-        """
         try:
-            response_json: Final = response.json()
-
-            # Extract results from Azure AI Search API response
-            results: Final = response_json.get("data", [])
-
-            # Try to get text_field from optional_params first, then litellm_params
-            optional_params: Final = litellm_logging_obj.model_call_details.get("optional_params", {})
-            text_field = optional_params.get("milvus_text_field", "")
-
-            # Fallback to litellm_params if not in optional_params
-
-            if not text_field:
-                text_field = litellm_logging_obj.model_call_details.get("litellm_params", {}).get(
-                    "milvus_text_field", ""
-                )
-
-            # Transform results to standard format
-            search_results: Final[list[VectorStoreSearchResult]] = []
-            for result in results:
-                # Extract text content
-                text_content = result.get(text_field, "")
-
-                content = [
-                    VectorStoreResultContent(
-                        text=text_content,
-                        type="text",
-                    )
-                ]
-
-                # Get the search score (distance from the query vector)
-                score = result.get("distance", 0.0)
-
-                # Build attributes with all available metadata
-                # Exclude system fields and already-processed fields
-                attributes = {}
-                for key, value in result.items():
-                    if key not in ["id", "content", "distance", text_field]:
-                        attributes[key] = value
-
-                result_obj = VectorStoreSearchResult(
-                    score=score,
-                    content=content,
-                    file_id=None,
-                    filename=None,
-                    attributes=attributes,
-                )
-                search_results.append(result_obj)
-
+            details: Final = litellm_logging_obj.model_call_details
+            text_field: Final = details.get("optional_params", {}).get("milvus_text_field", "") or details.get(
+                "litellm_params", {}
+            ).get("milvus_text_field", "")
             return VectorStoreSearchResponse(
                 object="vector_store.search_results.page",
-                search_query=litellm_logging_obj.model_call_details.get("input", ""),
-                data=search_results,
+                search_query=details.get("input", ""),
+                data=[  # mutable-ok: VectorStoreSearchResponse requires list data
+                    VectorStoreSearchResult(
+                        score=result.get("distance", 0.0),
+                        content=[  # mutable-ok: VectorStoreSearchResult requires list content
+                            VectorStoreResultContent(text=result.get(text_field, ""), type="text")
+                        ],
+                        file_id=None,
+                        filename=None,
+                        attributes={  # mutable-ok: VectorStoreSearchResult requires dict attributes
+                            key: value
+                            for key, value in result.items()
+                            if key not in ("id", "content", "distance", text_field)
+                        },
+                    )
+                    for result in response.json().get("data", [])
+                ],
             )
 
         except Exception as e:

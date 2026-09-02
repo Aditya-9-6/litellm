@@ -10,6 +10,7 @@ from typing_extensions import Protocol, ReadOnly, TypedDict, Unpack
 import litellm
 from litellm.llms.base_llm.vector_store.transformation import (
     BaseDirectVectorStoreConfig,
+    LiteLLMVectorStoreEmbeddingExecutor,
     VectorStoreEmbeddingExecutor,
 )
 from litellm.secret_managers.main import get_secret_str
@@ -66,22 +67,6 @@ class _AsyncMilvusClient(Protocol):
     ) -> object: ...
 
     async def close(self) -> None: ...
-
-
-def _embedding(model: str, query: str, config: Mapping[str, object]) -> object:
-    return litellm.embedding(  # pyright: ignore[reportUnknownMemberType, reportCallIssue, reportUnknownVariableType]  # LiteLLM's embedding overload leaves provider-specific settings untyped
-        model=model,
-        input=[query],  # mutable-ok: litellm.embedding requires list input
-        **config,  # pyright: ignore[reportArgumentType]  # kwargs-ok: embedding aliases carry provider-specific settings
-    )
-
-
-async def _aembedding(model: str, query: str, config: Mapping[str, object]) -> object:
-    return await litellm.aembedding(  # pyright: ignore[reportUnknownMemberType]  # LiteLLM leaves provider-specific settings untyped
-        model=model,
-        input=[query],  # mutable-ok: litellm.aembedding requires list input
-        **config,  # kwargs-ok: embedding aliases carry provider-specific settings
-    )
 
 
 def _new_sync_client(uri: str, token: str, db_name: str, timeout: float | None) -> _SyncMilvusClient:
@@ -185,12 +170,7 @@ class _EmbeddingItem(BaseModel):
 class _EmbeddingPayload(BaseModel):
     model_config = ConfigDict(frozen=True, from_attributes=True)
 
-    data: tuple[_EmbeddingItem, ...]
-
-    def vector(self) -> tuple[float, ...]:
-        if not self.data:
-            raise ValueError("The embedding response did not contain an embedding")
-        return self.data[0].embedding
+    data: tuple[_EmbeddingItem, ...] = Field(min_length=1)
 
 
 class MilvusGRPCVectorStoreConfig(BaseDirectVectorStoreConfig):
@@ -204,8 +184,9 @@ class MilvusGRPCVectorStoreConfig(BaseDirectVectorStoreConfig):
         super().__init__()
         self.sync_client = sync_client
         self.async_client = async_client
-        self.embedding_fn = embedding_fn or _embedding
-        self.aembedding_fn = aembedding_fn or _aembedding
+        embedding_executor: Final = LiteLLMVectorStoreEmbeddingExecutor()
+        self.embedding_fn = embedding_fn or embedding_executor.embed
+        self.aembedding_fn = aembedding_fn or embedding_executor.aembed
 
     def map_openai_params(
         self,
@@ -320,7 +301,7 @@ class MilvusGRPCVectorStoreConfig(BaseDirectVectorStoreConfig):
         params: _MilvusSearchParams,
         timeout: float | None,
     ) -> _MilvusSearchRequest:
-        query_vector: Final = _EmbeddingPayload.model_validate(embedding_response).vector()
+        query_vector: Final = _EmbeddingPayload.model_validate(embedding_response).data[0].embedding
         return _MilvusSearchRequest(
             collection_name=vector_store_id,
             data=[list(query_vector)],  # mutable-ok: PyMilvus requires nested list search data

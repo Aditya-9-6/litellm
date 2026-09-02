@@ -58,13 +58,7 @@ def _is_proxy_admin(user_api_key_dict: UserAPIKeyAuth) -> bool:
 def normalize_vector_store_provider(custom_llm_provider: object) -> str | None:
     if not isinstance(custom_llm_provider, str) or not custom_llm_provider:
         return None
-    if "/" not in custom_llm_provider:
-        return custom_llm_provider
-    try:
-        _, provider, _, _ = litellm.get_llm_provider(model=custom_llm_provider)
-        return provider
-    except Exception:
-        return custom_llm_provider.split("/", 1)[0]
+    return custom_llm_provider.split("/", 1)[0]
 
 
 def is_milvus_grpc_connection(custom_llm_provider: object, litellm_params: object) -> bool:
