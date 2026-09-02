@@ -105,8 +105,26 @@ def test_transform_no_system_no_tools():
         ("https://gateway.example/anthropic/v1/messages", "https://gateway.example/anthropic/v1/messages/count_tokens"),
     ],
 )
-def test_endpoint_appends_count_tokens_path_to_deployment_api_base(api_base, expected):
+def test_endpoint_appends_count_tokens_path_to_deployment_api_base(api_base, expected, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_BASE", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     assert AnthropicCountTokensConfig().get_anthropic_count_tokens_endpoint(api_base) == expected
+
+
+@pytest.mark.parametrize("env_var", ["ANTHROPIC_API_BASE", "ANTHROPIC_BASE_URL"])
+@pytest.mark.parametrize("api_base", [None, ""])
+def test_endpoint_honors_env_api_base_when_deployment_api_base_is_unset(env_var, api_base, monkeypatch):
+    """Chat and the WIF mint resolve ``ANTHROPIC_API_BASE`` / ``ANTHROPIC_BASE_URL`` via
+    ``AnthropicModelInfo.get_api_base``; the count POST must land on that same gateway, or a
+    minted ``sk-ant-oat01`` token is presented to Anthropic's public host instead. An empty
+    deployment ``api_base`` is treated as unset for the same reason."""
+    monkeypatch.delenv("ANTHROPIC_API_BASE", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv(env_var, "https://gateway.example")
+    assert (
+        AnthropicCountTokensConfig().get_anthropic_count_tokens_endpoint(api_base)
+        == "https://gateway.example/v1/messages/count_tokens"
+    )
 
 
 @pytest.fixture

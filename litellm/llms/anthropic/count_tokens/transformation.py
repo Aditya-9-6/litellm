@@ -27,14 +27,17 @@ class AnthropicCountTokensConfig:
         Args:
             api_base: The deployment's api_base, which names the chat surface (a host, or a
                 base already carrying ``/v1`` or ``/v1/messages``); the count-tokens path is
-                appended to it, so it is never the full count-tokens URL
+                appended to it, so it is never the full count-tokens URL. When unset or
+                empty, ``ANTHROPIC_API_BASE`` / ``ANTHROPIC_BASE_URL`` are honored just like
+                chat, falling back to Anthropic's public host
 
         Returns:
             The endpoint URL for the CountTokens API
         """
-        if api_base is None:
-            return "https://api.anthropic.com/v1/messages/count_tokens"
-        return anthropic_base_without_chat_suffix(api_base) + "/v1/messages/count_tokens"
+        from litellm.llms.anthropic.common_utils import AnthropicModelInfo
+
+        resolved_base: Final = AnthropicModelInfo.get_api_base(api_base or None) or "https://api.anthropic.com"
+        return anthropic_base_without_chat_suffix(resolved_base) + "/v1/messages/count_tokens"
 
     def transform_request_to_count_tokens(
         self,
