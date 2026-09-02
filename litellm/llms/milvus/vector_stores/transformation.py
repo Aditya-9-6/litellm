@@ -87,22 +87,13 @@ class MilvusVectorStoreConfig(BaseVectorStoreConfig):
         api_base: str | None,
         litellm_params: dict,
     ) -> str:
-        """
-        Get the base endpoint for Milvus API
-
-        Expected format: https://{milvus_api_base}.milvus.io
-        """
-        api_base = api_base or get_secret_str("MILVUS_API_BASE")
-
-        if not api_base:
+        resolved_api_base: Final = api_base or get_secret_str("MILVUS_API_BASE")
+        if not resolved_api_base:
             raise ValueError(
                 "Milvus API base URL is required. Set MILVUS_API_BASE environment variable or pass api_base in litellm_params."
             )
 
-        if api_base:
-            return api_base.rstrip("/")
-
-        return api_base
+        return resolved_api_base.rstrip("/")
 
     def transform_search_vector_store_request(
         self,
@@ -114,16 +105,7 @@ class MilvusVectorStoreConfig(BaseVectorStoreConfig):
         litellm_params: dict,
         extra_body: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, Any]]:
-        """
-        Transform search request for Azure AI Search API
-
-        Generates embeddings using litellm.embeddings and constructs Azure AI Search request
-        """
-        # Convert query to string if it's a list
-        if isinstance(query, list):
-            query = " ".join(query)
-
-        # Get embedding model from litellm_params (required)
+        query_text: Final = " ".join(query) if isinstance(query, list) else query
         embedding_model: Final = litellm_params.get("litellm_embedding_model")
         if not embedding_model:
             raise ValueError(
@@ -138,45 +120,34 @@ class MilvusVectorStoreConfig(BaseVectorStoreConfig):
                 "Example: litellm_params['embedding_config'] = {'api_base': 'https://krris-mh44uf7y-eastus2.cognitiveservices.azure.com/', 'api_key': 'os.environ/AZURE_API_KEY', 'api_version': '2025-09-01'}"
             )
 
-        # Get top_k (number of results to return)
-        # Generate embedding for the query using litellm.embeddings
         try:
             embedding_response: Final = litellm.embedding(
                 model=embedding_model,
-                input=[query],
+                input=[query_text],
                 **embedding_config,
             )
             query_vector: Final = embedding_response.data[0]["embedding"]
         except Exception as e:
             raise Exception(f"Failed to generate embedding for query: {e}")
 
-        # Azure AI Search endpoint for search
-        index_name: Final = vector_store_id  # vector_store_id is the index name
-        url: Final = f"{api_base}/v2/vectordb/entities/search"
-
-        # Build the request body for Azure AI Search with vector search
         request_body: Final[dict[str, Any]] = {
-            "collectionName": index_name,
+            "collectionName": vector_store_id,
             "data": [query_vector],
             "annsField": "book_intro_vector",
             **vector_store_search_optional_params,
+            **{
+                field: value
+                for field, value in (
+                    ("dbName", litellm_params.get("milvus_db_name")),
+                    ("partitionNames", litellm_params.get("milvus_partition_names")),
+                )
+                if value
+            },
         }
-
-        db_name: Final = litellm_params.get("milvus_db_name")
-        if db_name:
-            request_body["dbName"] = db_name
-
-        partition_names: Final = litellm_params.get("milvus_partition_names")
-        if partition_names:
-            request_body["partitionNames"] = partition_names
-
-        #########################################################
-        # Update logging object with details of the request
-        #########################################################
-        litellm_logging_obj.model_call_details["input"] = query
+        litellm_logging_obj.model_call_details["input"] = query_text
         litellm_logging_obj.model_call_details["embedding_model"] = embedding_model
 
-        return url, request_body
+        return f"{api_base}/v2/vectordb/entities/search", request_body
 
     def transform_search_vector_store_response(
         self, response: httpx.Response, litellm_logging_obj: LiteLLMLoggingObj

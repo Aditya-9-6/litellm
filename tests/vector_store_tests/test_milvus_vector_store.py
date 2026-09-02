@@ -129,14 +129,15 @@ class TestMilvusVectorStore:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("async_mode", (False, True))
-    async def test_rest_search(self, async_mode: bool) -> None:
+    @pytest.mark.parametrize("query", ("what is machine learning?", ["what is", "machine learning?"]))
+    async def test_rest_search(self, async_mode: bool, query: str | list[str]) -> None:
         mock_post: Final = (AsyncMock if async_mode else MagicMock)(
             return_value=httpx.Response(200, json=MOCK_MILVUS_SEARCH_RESPONSE)
         )
         client: Final = MagicMock(spec=AsyncHTTPHandler if async_mode else HTTPHandler, post=mock_post)
         search: Final = partial(
             vector_store_asearch if async_mode else vector_store_search,
-            query="what is machine learning?",
+            query=query,
             vector_store_id="book_2",
             custom_llm_provider="milvus",
             api_base="https://milvus.example.com",
@@ -198,16 +199,6 @@ class TestMilvusVectorStore:
             await search() if async_mode else search()
         client.search.assert_not_called()
 
-    def _extract_request_body(self, mock_post):
-        call_args = mock_post.call_args
-        request_data_str = call_args.kwargs.get("data")
-        if request_data_str:
-            return json.loads(request_data_str)
-        request_data = call_args.kwargs.get("json")
-        if request_data is None and len(call_args.args) > 0 and isinstance(call_args.args[0], dict):
-            request_data = call_args.args[0]
-        return request_data
-
     def test_user_supplied_db_and_partition_are_dropped(self):
         """User-supplied dbName / partitionNames must not be forwarded to Milvus."""
         mock_response = MagicMock()
@@ -241,7 +232,7 @@ class TestMilvusVectorStore:
                 )
 
                 mock_post.assert_called_once()
-                request_data = self._extract_request_body(mock_post)
+                request_data = json.loads(mock_post.call_args.kwargs["data"])
                 assert request_data is not None
                 assert "dbName" not in request_data
                 assert "partitionNames" not in request_data
@@ -282,7 +273,7 @@ class TestMilvusVectorStore:
                 )
 
                 mock_post.assert_called_once()
-                request_data = self._extract_request_body(mock_post)
+                request_data = json.loads(mock_post.call_args.kwargs["data"])
                 assert request_data is not None
                 assert request_data["dbName"] == "tenant_a_db"
                 assert request_data["partitionNames"] == ["tenant_a_partition"]
@@ -322,7 +313,7 @@ class TestMilvusVectorStore:
                 )
 
                 mock_post.assert_called_once()
-                request_data = self._extract_request_body(mock_post)
+                request_data = json.loads(mock_post.call_args.kwargs["data"])
                 assert request_data is not None
                 assert request_data["dbName"] == "tenant_a_db"
                 assert request_data["partitionNames"] == ["tenant_a_partition"]
@@ -643,14 +634,26 @@ class TestMilvusVectorStore:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("injected", (False, True))
     @pytest.mark.parametrize(
-        ("async_mode", "error"),
-        ((False, None), (True, None), (False, RuntimeError), (True, RuntimeError), (True, asyncio.CancelledError)),
+        ("async_mode", "result", "error"),
+        (
+            (False, [[]], None),
+            (True, [[]], None),
+            (False, [[]], RuntimeError),
+            (True, [[]], RuntimeError),
+            (True, [[]], asyncio.CancelledError),
+            (False, [[None]], TypeError),
+            (True, [[None]], TypeError),
+            (False, [[{1: "invalid key"}]], TypeError),
+            (True, [[{1: "invalid key"}]], TypeError),
+        ),
     )
     async def test_grpc_client_ownership_on_success_error_and_cancellation(
-        self, injected: bool, async_mode: bool, error: type[BaseException] | None
+        self, injected: bool, async_mode: bool, result: object, error: type[BaseException] | None
     ) -> None:
         mock_client: Final = MagicMock(
-            search=(AsyncMock if async_mode else MagicMock)(return_value=[[]], side_effect=error),
+            search=(AsyncMock if async_mode else MagicMock)(
+                return_value=result, side_effect=None if error is TypeError else error
+            ),
             close=(AsyncMock if async_mode else MagicMock)(),
         )
         embedding_executor: Final = MagicMock(

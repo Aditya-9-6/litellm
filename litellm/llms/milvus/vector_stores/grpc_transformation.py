@@ -32,8 +32,7 @@ _EMPTY_EMBEDDING_CONFIG: Final[Mapping[str, object]] = MappingProxyType({})
 _PYMILVUS_INSTALL_HINT: Final = (
     "Milvus gRPC transport requires the 'pymilvus' package. Install it with 'pip install litellm[milvus]'."
 )
-_MILVUS_ENTITY_ADAPTER: Final = TypeAdapter(Mapping[str, object])
-_STRING_KEYS_ADAPTER: Final = TypeAdapter(tuple[str, ...])
+_MILVUS_MAPPING_ADAPTER: Final = TypeAdapter(Mapping[str, object])
 
 
 class _MilvusSearchRequest(TypedDict):
@@ -228,24 +227,13 @@ class MilvusGRPCVectorStoreConfig(BaseDirectVectorStoreConfig):
         return timeout_seconds, timeout_seconds
 
     @staticmethod
-    def _is_hit(value: object) -> typing.TypeGuard[Mapping[str, object]]:  # noqa: TID251  # guard-ok: validates Mapping and string keys
-        if not isinstance(value, Mapping):
-            return False
-        try:
-            _STRING_KEYS_ADAPTER.validate_python(
-                tuple(value.keys())  # pyright: ignore[reportUnknownArgumentType]  # runtime Mapping keys are untyped
-            )
-        except ValidationError:
-            return False
-        return True
-
-    @staticmethod
     def _to_result(raw_hit: object, text_field: str) -> VectorStoreSearchResult:
-        if not MilvusGRPCVectorStoreConfig._is_hit(raw_hit):
-            raise TypeError(f"Milvus returned an invalid search hit: {type(raw_hit).__name__}")
-        hit: Final = raw_hit
+        try:
+            hit: Final = _MILVUS_MAPPING_ADAPTER.validate_python(raw_hit)
+        except ValidationError as e:
+            raise TypeError(f"Milvus returned an invalid search hit: {type(raw_hit).__name__}") from e
         entity_value: Final = hit.get("entity")
-        entity: Final = _MILVUS_ENTITY_ADAPTER.validate_python(entity_value or _EMPTY_EMBEDDING_CONFIG)
+        entity: Final = _MILVUS_MAPPING_ADAPTER.validate_python(entity_value or _EMPTY_EMBEDDING_CONFIG)
         text_value: Final = entity.get(text_field, hit.get(text_field, ""))
         attributes: Final[dict[str, object]] = {  # mutable-ok: VectorStoreSearchResult requires dict attributes
             **{  # mutable-ok: VectorStoreSearchResult requires dict attributes
