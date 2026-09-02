@@ -14,6 +14,7 @@ from litellm.llms.anthropic.common_utils import AnthropicError
 from litellm.llms.anthropic.count_tokens.transformation import (
     AnthropicCountTokensConfig,
 )
+from litellm.llms.anthropic.wif import anthropic_base_without_chat_suffix
 from litellm.llms.custom_httpx.http_handler import get_async_httpx_client
 
 
@@ -66,8 +67,11 @@ class AnthropicCountTokensHandler(AnthropicCountTokensConfig):
 
             verbose_logger.debug("Transformed request: %s", request_body)
 
-            # Get endpoint URL
-            endpoint_url: Final = api_base or self.get_anthropic_count_tokens_endpoint()
+            endpoint_url: Final = (
+                f"{anthropic_base_without_chat_suffix(api_base)}/v1/messages/count_tokens"
+                if api_base
+                else self.get_anthropic_count_tokens_endpoint()
+            )
 
             verbose_logger.debug("Making request to: %s", endpoint_url)
 
