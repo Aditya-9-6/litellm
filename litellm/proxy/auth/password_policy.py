@@ -38,7 +38,7 @@ PasswordValidationFailure = PasswordTooShort | PasswordBreached
 
 
 def get_password_policy(general_settings: Mapping[str, object] | None) -> PasswordPolicy:
-    raw: Final = (general_settings or {}).get("password_policy")
+    raw: Final = general_settings.get("password_policy") if general_settings is not None else None
     if isinstance(raw, PasswordPolicy):
         return raw
     if raw is None:

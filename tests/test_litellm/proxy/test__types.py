@@ -306,3 +306,32 @@ def test_new_user_request_loudly_rejects_a_password():
 def test_new_user_request_without_password_still_works():
     request = NewUserRequest(user_email="alice@example.com")
     assert request.password is None
+
+
+def test_update_user_request_loudly_rejects_a_password():
+    """
+    /user/update no longer accepts passwords (self-service goes through
+    /user/password/change, admin resets through invitation links). The field
+    is kept so a sent password fails visibly instead of being silently
+    dropped, which would let callers believe a rotation happened.
+    """
+    with pytest.raises(ValidationError, match="/user/password/change"):
+        UpdateUserRequest(user_id="user-123", password="hunter2hunter2")
+
+
+def test_update_user_request_without_password_still_works():
+    request = UpdateUserRequest(user_id="user-123", user_email="alice@example.com")
+    assert request.password is None
+
+
+def test_bulk_update_user_request_loudly_rejects_a_password():
+    """The bulk path shares UpdateUserRequestNoUserIDorEmail and must reject too."""
+    from litellm.types.proxy.management_endpoints.internal_user_endpoints import (
+        BulkUpdateUserRequest,
+    )
+
+    with pytest.raises(ValidationError, match="/user/password/change"):
+        BulkUpdateUserRequest(
+            all_users=True,
+            user_updates={"password": "hunter2hunter2"},
+        )

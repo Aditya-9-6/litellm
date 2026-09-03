@@ -56,7 +56,7 @@ from litellm.proxy.management_helpers.object_permission_utils import (
     handle_update_object_permission_common,
 )
 from litellm.proxy.management_helpers.utils import management_endpoint_wrapper
-from litellm.proxy.utils import handle_exception_on_proxy, hash_password
+from litellm.proxy.utils import handle_exception_on_proxy
 from litellm.repositories.organization_repository import OrganizationRepository
 from litellm.repositories.prisma_protocols import TableActions
 from litellm.repositories.table_repositories import (
@@ -152,12 +152,6 @@ def _team_membership_table(
         prisma_client
     ).table
     return team_membership_table
-
-
-def _hash_password_in_dict(data: dict) -> None:
-    """Hash password field in-place if present."""
-    if "password" in data and data["password"] is not None:
-        data["password"] = hash_password(data["password"])
 
 
 def _strip_password_from_response(response) -> None:
@@ -1420,7 +1414,6 @@ async def _update_single_user_helper(
 
     data_json: Final[dict] = user_request.model_dump(exclude_unset=True)
     non_default_values = _update_internal_user_params(data_json=data_json, data=user_request)
-    _hash_password_in_dict(non_default_values)
 
     existing_user_row: BaseModel | None = None
     if user_request.user_id:
@@ -1595,7 +1588,6 @@ async def user_update(
     Parameters:
         - user_id: Optional[str] - Specify a user id. If not set, a unique id will be generated.
         - user_email: Optional[str] - Specify a user email.
-        - password: Optional[str] - Specify a user password.
         - user_alias: Optional[str] - A descriptive name for you to know who this user id refers to.
         - teams: Optional[list] - specify a list of team id's a user belongs to.
         - send_invite_email: Optional[bool] - Specify if an invite email should be sent.

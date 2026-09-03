@@ -840,6 +840,7 @@ class LiteLLMRoutes(enum.Enum):
         "/organization/daily/activity",
         "/user/available_roles",  # read-only role metadata; any authenticated user may read
         "/user/list",  # org admins checked in endpoint; non-admins get 403
+        "/user/password/change",  # endpoint only ever writes the caller's own row
         "/model/{model_id}/update",
         "/prompt/list",
         "/prompt/info",
@@ -1765,6 +1766,17 @@ class UpdateUserRequestNoUserIDorEmail(GenerateRequestBase):  # shared with Bulk
     ) = None
     max_budget: float | None = None
 
+    @field_validator("password")
+    @classmethod
+    def password_not_supported(cls, value: str | None) -> str | None:
+        if value is not None:
+            raise ValueError(
+                "password cannot be set via /user/update. Change your own password with "
+                "POST /user/password/change. To reset another user's password, send them an "
+                "invitation link (POST /invitation/new)."
+            )
+        return value
+
 
 class UpdateUserRequest(UpdateUserRequestNoUserIDorEmail):
     # Note: the defaults of all Params here MUST BE NONE
@@ -1778,6 +1790,16 @@ class UpdateUserRequest(UpdateUserRequestNoUserIDorEmail):
         if values.get("user_id") is None and values.get("user_email") is None:
             raise ValueError("Either user id or user email must be provided")
         return values
+
+
+class ChangePasswordRequest(LiteLLMPydanticObjectBase):
+    current_password: str
+    new_password: str
+
+
+class ChangePasswordResponse(LiteLLMPydanticObjectBase):
+    user_id: str
+    message: str
 
 
 class DeleteUserRequest(LiteLLMPydanticObjectBase):
