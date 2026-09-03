@@ -2074,6 +2074,28 @@ async def test_pre_call_deployment_hook_converts_stream_only_for_ccr_chat_comple
     assert kwargs["stream"] is True
 
 
+@pytest.mark.parametrize("call_type", [CallTypes.responses, CallTypes.aresponses])
+@pytest.mark.asyncio
+async def test_pre_call_deployment_hook_preserves_background_responses_stream(
+    guardrail: HeadroomGuardrail,
+    call_type: CallTypes,
+):
+    """Background streaming /v1/responses requests must not be flipped to blocking;
+    the client is expecting a queued job and live SSE, not a replayed final response."""
+    kwargs = {
+        "model": "gpt-4o",
+        "stream": True,
+        "background": True,
+        "tools": [_responses_retrieve_tool_definition()],
+    }
+
+    result = await guardrail.async_pre_call_deployment_hook(kwargs=kwargs, call_type=call_type)
+
+    assert result is kwargs
+    assert kwargs["stream"] is True
+    assert HEADROOM_CONVERTED_STREAM_KEY not in kwargs
+
+
 @pytest.mark.asyncio
 async def test_pre_call_deployment_hook_still_compresses_for_deployment_level_configs(
     guardrail: HeadroomGuardrail,
