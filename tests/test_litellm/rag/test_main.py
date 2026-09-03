@@ -449,6 +449,53 @@ async def test_aquery_forwards_vector_store_params_to_search_but_not_completion(
     assert not (store_only_keys & set(fake_completion.await_args.kwargs))
 
 
+@pytest.mark.asyncio
+async def test_aquery_store_params_win_over_top_level_api_credentials():
+    """
+    Regression for LIT-6773: a top-level api_key / api_base in kwargs (SDK
+    completion credentials, or proxy request_data when
+    forward_llm_provider_auth_headers is on) must not override the trusted
+    vector_store_params on the search call, or Milvus search would auth with
+    the LLM key against the wrong host.
+    """
+    from unittest.mock import AsyncMock
+
+    from litellm.types.vector_stores import VectorStoreSearchResponse
+
+    fake_search = AsyncMock(
+        return_value=VectorStoreSearchResponse(
+            object="vector_store.search_results.page", search_query="q", data=[]
+        )
+    )
+    fake_completion = AsyncMock(
+        return_value=ModelResponse(
+            id="chatcmpl-test",
+            choices=[{"index": 0, "message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+            model="gpt-4o-mini",
+        )
+    )
+    with (
+        patch("litellm.vector_stores.asearch", new=fake_search),  # test-quality-ok: the search boundary under test
+        patch("litellm.acompletion", new=fake_completion),  # test-quality-ok: the completion boundary under test
+    ):
+        await litellm.aquery(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": "hello"}],
+            retrieval_config={"vector_store_id": "customer_kb", "custom_llm_provider": "milvus"},
+            vector_store_params={
+                "api_base": "http://127.0.0.1:19530",
+                "api_key": "root:Milvus",
+            },
+            api_base="https://llm.example.com",
+            api_key="sk-llm-key",
+        )
+
+    fake_search.assert_awaited_once()
+    search_kwargs = fake_search.await_args.kwargs
+    assert search_kwargs["api_base"] == "http://127.0.0.1:19530"
+    assert search_kwargs["api_key"] == "root:Milvus"
+
+
 def test_rag_call_types_are_registered():
     """
     query/aquery/ingest/aingest are @client-decorated entry points, so their
