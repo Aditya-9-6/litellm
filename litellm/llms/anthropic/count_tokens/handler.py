@@ -28,11 +28,12 @@ class AnthropicCountTokensHandler(AnthropicCountTokensConfig):
         self,
         model: str,
         messages: list[dict[str, Any]],
-        api_key: str,
+        api_key: str | None = None,
         api_base: str | None = None,
         timeout: float | httpx.Timeout | None = None,
         tools: list[dict[str, Any]] | None = None,
         system: Any | None = None,
+        auth_token: str | None = None,
     ) -> dict[str, Any]:
         """
         Handle a CountTokens request using httpx.
@@ -40,9 +41,11 @@ class AnthropicCountTokensHandler(AnthropicCountTokensConfig):
         Args:
             model: The model identifier (e.g., "claude-3-5-sonnet-20241022")
             messages: The messages to count tokens for
-            api_key: The Anthropic API key
+            api_key: The Anthropic API key (sent as ``x-api-key``)
             api_base: Optional deployment api_base the count-tokens path is appended to
             timeout: Optional timeout for the request (defaults to litellm.request_timeout)
+            auth_token: Bearer token used when no api_key is configured, matching how chat
+                authenticates ``ANTHROPIC_AUTH_TOKEN``
 
         Returns:
             Dictionary containing token count response
@@ -72,7 +75,7 @@ class AnthropicCountTokensHandler(AnthropicCountTokensConfig):
             verbose_logger.debug("Making request to: %s", endpoint_url)
 
             # Get required headers
-            headers: Final = self.get_required_headers(api_key)
+            headers: Final = self.get_required_headers(api_key=api_key, auth_token=auth_token)
 
             # Use LiteLLM's async httpx client
             async_client: Final = get_async_httpx_client(llm_provider=litellm.LlmProviders.ANTHROPIC)

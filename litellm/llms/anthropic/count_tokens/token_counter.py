@@ -57,15 +57,15 @@ class AnthropicTokenCounter(BaseTokenCounter):
         litellm_params: Final = deployment.get("litellm_params", {})
         api_base: Final = litellm_params.get("api_base")
         static_key: Final = litellm_params.get("api_key") or os.getenv("ANTHROPIC_API_KEY")
-        auth_token_configured: Final = AnthropicModelInfo.get_auth_token() is not None
+        auth_token: Final = AnthropicModelInfo.get_auth_token() if not static_key else None
 
         try:
             api_key: Final = (
                 static_key
-                if static_key or auth_token_configured
+                if static_key or auth_token
                 else await aget_anthropic_wif_token(litellm_params, api_base, model_to_use)
             )
-            if not api_key:
+            if not api_key and not auth_token:
                 verbose_logger.warning("No Anthropic credential found for token counting")
                 return None
 
@@ -73,6 +73,7 @@ class AnthropicTokenCounter(BaseTokenCounter):
                 model=model_to_use,
                 messages=messages,
                 api_key=api_key,
+                auth_token=auth_token,
                 api_base=api_base,
                 tools=tools,
                 system=system,

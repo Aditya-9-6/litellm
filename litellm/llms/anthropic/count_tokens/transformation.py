@@ -61,12 +61,17 @@ class AnthropicCountTokensConfig:
 
         return request
 
-    def get_required_headers(self, api_key: str) -> dict[str, str]:
+    def get_required_headers(self, api_key: str | None = None, auth_token: str | None = None) -> dict[str, str]:
         """
         Get the required headers for the CountTokens API.
 
+        Mirrors the chat surface's credential tiering: ``api_key`` rides ``x-api-key`` (with the
+        oauth handler upgrading an ``sk-ant-oat`` key to Bearer), while ``auth_token`` is sent
+        as ``Authorization: Bearer`` as documented for ``ANTHROPIC_AUTH_TOKEN``.
+
         Args:
             api_key: The Anthropic API key
+            auth_token: Bearer token (e.g. ``ANTHROPIC_AUTH_TOKEN``) used when no api_key is set
 
         Returns:
             Dictionary of required headers
@@ -77,11 +82,14 @@ class AnthropicCountTokensConfig:
 
         headers: dict[str, str] = {
             "Content-Type": "application/json",
-            "x-api-key": api_key,
             "anthropic-version": "2023-06-01",
             "anthropic-beta": ANTHROPIC_TOKEN_COUNTING_BETA_VERSION,
         }
-        headers, _ = optionally_handle_anthropic_oauth(headers=headers, api_key=api_key)
+        if api_key:
+            headers["x-api-key"] = api_key
+            headers, _ = optionally_handle_anthropic_oauth(headers=headers, api_key=api_key)
+        elif auth_token:
+            headers["authorization"] = f"Bearer {auth_token}"
         return headers
 
     def validate_request(self, model: str, messages: list[dict[str, Any]]) -> None:

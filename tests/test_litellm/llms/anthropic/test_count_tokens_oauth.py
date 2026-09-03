@@ -132,11 +132,16 @@ class TestCountTokensUsesWorkloadIdentity:
         assert seen["api_key"] == minted
 
     @pytest.mark.asyncio
-    async def test_an_auth_token_deployment_never_mints(self, monkeypatch):
+    async def test_an_auth_token_deployment_counts_via_bearer_without_minting(self, monkeypatch):
+        """``ANTHROPIC_AUTH_TOKEN`` is the documented Bearer credential chat honors; when it is
+        the only credential configured, count_tokens must reach Anthropic with it in the
+        ``Authorization: Bearer`` header rather than silently falling back to the local
+        tokenizer or minting a federation token behind the caller's back."""
         from litellm.llms.anthropic.count_tokens import token_counter as token_counter_module
 
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "bearer-token-for-testing")
+        auth_token = "bearer-token-for-testing"
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", auth_token)
         mint_calls: list[str] = []
 
         async def fake_mint(_params, _api_base, model):
@@ -144,6 +149,19 @@ class TestCountTokensUsesWorkloadIdentity:
             return "sk-ant-oat01-should-not-be-minted"
 
         monkeypatch.setattr("litellm.llms.anthropic.wif.aget_anthropic_wif_token", fake_mint, raising=False)
+
+        seen: dict[str, object] = {}
+
+        async def fake_request(**kwargs):
+            seen.update(kwargs)
+            return {"input_tokens": 11}
+
+        monkeypatch.setattr(
+            token_counter_module.anthropic_count_tokens_handler,
+            "handle_count_tokens_request",
+            fake_request,
+            raising=False,
+        )
 
         result = await token_counter_module.AnthropicTokenCounter().count_tokens(
             model_to_use="claude-sonnet-4-5",
@@ -159,8 +177,17 @@ class TestCountTokensUsesWorkloadIdentity:
             request_model="claude-sonnet-4-5",
         )
 
-        assert result is None
+        assert result is not None
+        assert result.total_tokens == 11
         assert mint_calls == []
+        assert seen["auth_token"] == auth_token
+        assert not seen.get("api_key")
+
+        from litellm.llms.anthropic.count_tokens.transformation import AnthropicCountTokensConfig
+
+        headers = AnthropicCountTokensConfig().get_required_headers(auth_token=auth_token)
+        assert headers.get("authorization") == f"Bearer {auth_token}"
+        assert "x-api-key" not in headers
 
     @pytest.mark.asyncio
     async def test_a_failed_mint_degrades_like_an_anthropic_error(self, monkeypatch):
