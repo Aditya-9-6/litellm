@@ -163,6 +163,64 @@ class TestCountTokensUsesWorkloadIdentity:
         assert mint_calls == []
 
     @pytest.mark.asyncio
+    async def test_a_vault_only_api_key_never_mints(self, monkeypatch):
+        """When ANTHROPIC_API_KEY lives only in a secret manager, count_tokens must resolve
+        it through the same secret-manager-aware path chat uses, not fall through to WIF."""
+        from litellm.llms.anthropic.count_tokens import token_counter as token_counter_module
+        from litellm.secret_managers import main as secret_manager_main
+
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+        vault_key = "sk-ant-api03-from-vault"
+
+        def fake_get_secret_str(secret_name, default_value=None):
+            if secret_name == "ANTHROPIC_API_KEY":
+                return vault_key
+            return None
+
+        monkeypatch.setattr(secret_manager_main, "get_secret_str", fake_get_secret_str, raising=False)
+
+        mint_calls: list[str] = []
+
+        async def fake_mint(_params, _api_base, model):
+            mint_calls.append(model)
+            return "sk-ant-oat01-should-not-be-minted"
+
+        monkeypatch.setattr("litellm.llms.anthropic.wif.aget_anthropic_wif_token", fake_mint, raising=False)
+
+        seen: dict[str, object] = {}
+
+        async def fake_request(**kwargs):
+            seen.update(kwargs)
+            return {"input_tokens": 7}
+
+        monkeypatch.setattr(
+            token_counter_module.anthropic_count_tokens_handler,
+            "handle_count_tokens_request",
+            fake_request,
+            raising=False,
+        )
+
+        result = await token_counter_module.AnthropicTokenCounter().count_tokens(
+            model_to_use="claude-sonnet-4-5",
+            messages=[{"role": "user", "content": "hi"}],
+            contents=None,
+            deployment={
+                "litellm_params": {
+                    "model": "anthropic/claude-sonnet-4-5",
+                    "anthropic_federation_rule_id": "fdrl_x",
+                    "anthropic_organization_id": "org-x",
+                }
+            },
+            request_model="claude-sonnet-4-5",
+        )
+
+        assert result is not None
+        assert result.total_tokens == 7
+        assert seen["api_key"] == vault_key
+        assert mint_calls == []
+
+    @pytest.mark.asyncio
     async def test_a_failed_mint_degrades_like_an_anthropic_error(self, monkeypatch):
         import litellm
         from litellm.llms.anthropic.count_tokens import token_counter as token_counter_module
