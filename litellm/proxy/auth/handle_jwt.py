@@ -57,6 +57,7 @@ from litellm.proxy.common_utils.user_api_key_cache import (
     UserApiKeyCache,
     get_management_object_ttl,
 )
+from litellm.proxy.management_endpoints.types import highest_privilege_role
 from litellm.proxy.utils import PrismaClient, ProxyLogging
 from litellm.repositories.user_repository import UserRepository
 
@@ -145,6 +146,15 @@ def jwks_unavailable_exception(error: JWKSUnreachableError) -> ProxyException:
         param="None",
         code=status.HTTP_503_SERVICE_UNAVAILABLE,
     )
+
+
+def _role_claim_values(claim: object, default_value: list[str] | None) -> list[str] | None:
+    if isinstance(claim, str):
+        return [claim]
+    if isinstance(claim, list):
+        entries: Final = cast(list[object], claim)  # cast-ok: isinstance narrows the claim, not its elements
+        return [role for role in entries if isinstance(role, str)]
+    return default_value
 
 
 class JWTHandler:
@@ -251,23 +261,21 @@ class JWTHandler:
 
         Note:
             The function handles both single string roles and lists of roles from the JWT.
-            If multiple mappings match the JWT roles, the first matching mapping is returned.
+            If multiple mappings match the JWT roles, the highest privilege internal role wins.
         """
         if self.litellm_jwtauth.role_mappings is None:
             return None
 
-        jwt_role: Final = self.get_jwt_role(token=token, default_value=None)
-        if not jwt_role:
+        jwt_roles: Final = frozenset(self.get_jwt_role(token=token, default_value=None) or ())
+        if not jwt_roles:
             return None
 
-        jwt_role_set: Final = set(jwt_role)
-
-        for role_mapping in self.litellm_jwtauth.role_mappings:
-            # Check if the mapping role matches any of the JWT roles
-            if role_mapping.role in jwt_role_set:
-                return role_mapping.internal_role
-
-        return None
+        return cast(  # cast-ok: every candidate is an RBAC_ROLES member, so the winner is one too
+            RBAC_ROLES | None,
+            highest_privilege_role(
+                mapping.internal_role for mapping in self.litellm_jwtauth.role_mappings if mapping.role in jwt_roles
+            ),
+        )
 
     def get_rbac_role(self, token: dict) -> RBAC_ROLES | None:
         """
@@ -541,7 +549,7 @@ class JWTHandler:
         return user_roles
 
     def map_jwt_role_to_litellm_role(self, token: dict) -> LitellmUserRoles | None:
-        """Map roles from JWT to LiteLLM user roles"""
+        """Map roles from JWT to the highest privilege LiteLLM user role they match"""
         if not self.litellm_jwtauth.jwt_litellm_role_map:
             return None
 
@@ -549,11 +557,11 @@ class JWTHandler:
         if not jwt_roles:
             return None
 
-        for mapping in self.litellm_jwtauth.jwt_litellm_role_map:
-            for role in jwt_roles:
-                if fnmatch.fnmatch(role, mapping.jwt_role):
-                    return mapping.litellm_role
-        return None
+        return highest_privilege_role(
+            mapping.litellm_role
+            for mapping in self.litellm_jwtauth.jwt_litellm_role_map
+            if any(fnmatch.fnmatch(role, mapping.jwt_role) for role in jwt_roles)
+        )
 
     def get_jwt_role(self, token: dict, default_value: list[str] | None) -> list[str] | None:
         """
@@ -561,20 +569,16 @@ class JWTHandler:
 
         Returns the jwt role from the token.
 
-        Set via 'roles_jwt_field' in the config.
+        Set via 'roles_jwt_field' in the config. A scalar claim is read as a single role and
+        non-string entries are dropped, so a role mapping never matches individual characters.
         """
+        if self.litellm_jwtauth.roles_jwt_field is None:
+            return default_value
         try:
-            if self.litellm_jwtauth.roles_jwt_field is not None:
-                user_roles = get_nested_value(
-                    data=token,
-                    key_path=self.litellm_jwtauth.roles_jwt_field,
-                    default=default_value,
-                )
-            else:
-                user_roles = default_value
+            claim: Final = get_nested_value(data=token, key_path=self.litellm_jwtauth.roles_jwt_field)
         except KeyError:
-            user_roles = default_value
-        return user_roles
+            return default_value
+        return _role_claim_values(claim, default_value)
 
     def is_allowed_user_role(self, user_roles: list[str] | None) -> bool:
         """
@@ -1507,13 +1511,9 @@ class JWTAuthManager:
         return individual_team_id, team_object
 
     @staticmethod
-    def get_all_team_ids(jwt_handler: JWTHandler, jwt_valid_token: dict) -> set[str]:
-        """Get combined team IDs from groups and individual team_id"""
-        team_ids_from_groups: Final = jwt_handler.get_team_ids_from_jwt(token=jwt_valid_token)
-
-        all_team_ids: Final = set(team_ids_from_groups)
-
-        return all_team_ids
+    def get_all_team_ids(jwt_handler: JWTHandler, jwt_valid_token: dict) -> tuple[str, ...]:
+        """Team ids from the JWT groups claim, deduplicated in claim order so team selection is deterministic"""
+        return tuple(dict.fromkeys(jwt_handler.get_team_ids_from_jwt(token=jwt_valid_token)))
 
     @staticmethod
     def _team_has_passthrough_route_access(
@@ -1547,7 +1547,7 @@ class JWTAuthManager:
 
     @staticmethod
     async def find_team_with_model_access(
-        team_ids: set[str],
+        team_ids: Sequence[str],
         requested_model: str | None,
         route: str,
         jwt_handler: JWTHandler,
@@ -1625,7 +1625,7 @@ class JWTAuthManager:
             # Claim resolved but no model access, or fallback disabled — deny.
             raise HTTPException(
                 status_code=403,
-                detail=f"No team has access to the requested model: {requested_model}. Checked teams={team_ids}. Check `/models` to see all available models.",
+                detail=f"No team has access to the requested model: {requested_model}. Checked teams={list(team_ids)}. Check `/models` to see all available models.",
             )
 
         # No claim team resolved and fallback enabled — defer to fallback.
@@ -1807,7 +1807,7 @@ class JWTAuthManager:
     @staticmethod
     def get_team_id_from_header(
         request_headers: dict | None,
-        allowed_team_ids: set[str],
+        allowed_team_ids: Sequence[str],
         fallback_to_db_teams: bool = False,
     ) -> str | None:
         """
@@ -1816,7 +1816,7 @@ class JWTAuthManager:
 
         Args:
             request_headers: Dictionary of request headers
-            allowed_team_ids: Set of team IDs the user is allowed to access (from JWT)
+            allowed_team_ids: Team IDs the user is allowed to access (from JWT)
             fallback_to_db_teams: When True and the JWT carries no team claims
                 (allowed_team_ids is empty), the header value is returned
                 provisionally and validated against DB memberships later in
@@ -2311,7 +2311,7 @@ class JWTAuthManager:
 
         # Get team with model access
         ## Check if team_id is specified via x-litellm-team-id header
-        all_team_ids: Final = JWTAuthManager.get_all_team_ids(jwt_handler, jwt_valid_token)
+        claim_team_ids: Final = JWTAuthManager.get_all_team_ids(jwt_handler, jwt_valid_token)
         specific_team_id: Final = jwt_handler.get_team_id(token=jwt_valid_token, default_value=None)
 
         # The DB fallback only applies when the token carries no team identity at
@@ -2327,8 +2327,11 @@ class JWTAuthManager:
             and not jwt_handler.get_team_alias(token=jwt_valid_token, default_value=None)
             and team_id is None
         )
-        if specific_team_id and not db_team_fallback:
-            all_team_ids.add(specific_team_id)
+        all_team_ids: Final = (
+            tuple(dict.fromkeys((specific_team_id, *claim_team_ids)))
+            if specific_team_id and not db_team_fallback
+            else claim_team_ids
+        )
 
         header_team_id: Final = JWTAuthManager.get_team_id_from_header(
             request_headers=request_headers,
