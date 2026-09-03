@@ -8005,8 +8005,9 @@ def speech(
     model_info: Final = kwargs.get("model_info", None)
     shared_session: Final = kwargs.get("shared_session", None)
     model, custom_llm_provider, dynamic_api_key, api_base = get_llm_provider(
-        model=model, custom_llm_provider=custom_llm_provider, api_base=api_base
+        model=model, custom_llm_provider=custom_llm_provider, api_base=api_base, api_key=api_key
     )
+    api_key = dynamic_api_key if dynamic_api_key is not None else api_key
     kwargs.pop("tags", [])
 
     optional_params = {}
